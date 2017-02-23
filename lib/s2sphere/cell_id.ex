@@ -46,8 +46,10 @@ defmodule S2Sphere.CellId do
     CellId.from_face_ij(face, i, j)
   end
 
-  def from_face_pos_level(%CellId{} = cell_id, face, pos, level) do
-
+  def from_face_pos_level(face, pos, level) do
+    (face <<< @pos_bits) + (pos ||| 1)
+    |> CellId.new()
+    |> CellId.parent(level)
   end
 
   def lookup_pos do
@@ -111,7 +113,8 @@ defmodule S2Sphere.CellId do
   end
 
   def child(%CellId{} = cell_id, pos) do
-
+    new_lsb = CellId.lsb(cell_id) >>> 2
+    CellId.new(cell_id.id + (2 * pos + 1 - 4) * new_lsb)
   end
 
   def contains(%CellId{} = cell_id, %CellId{id: other_id} = other_cell_id) do
@@ -127,9 +130,7 @@ defmodule S2Sphere.CellId do
     (cell_id.id &&& (CellId.lsb_for_level(0) - 1)) == 0
   end
 
-  def id(%CellId{} = cell_id) do
-
-  end
+  def id(%CellId{id: id}), do: id
 
   def is_valid(%CellId{} = cell_id) do
 
@@ -143,9 +144,7 @@ defmodule S2Sphere.CellId do
     id >>> @pos_bits
   end
 
-  def pos(%CellId{} = cell_id) do
-
-  end
+  def pos(%CellId{id: id}), do: id &&& (0xffffffffffffffff >>> @face_bits)
 
   def is_leaf(%CellId{id: id}) do
     (id &&& 1) != 0
@@ -205,8 +204,8 @@ defmodule S2Sphere.CellId do
     CellId.new(id + (cell_id |> CellId.lsb) + (level |> CellId.lsb_for_level))
   end
 
-  def prev(%CellId{} = cell_id) do
-
+  def prev(%CellId{id: id} = cell_id) do
+    CellId.new(id - ((cell_id |> CellId.lsb) <<< 1))
   end
 
   def next(%CellId{id: id} = cell_id) do
@@ -243,12 +242,14 @@ defmodule S2Sphere.CellId do
     CellId.new(id + (CellId.lsb(cell_id) - 1))
   end
 
-  def begin(%CellId{} = cell_id, level) do
-
+  def begin(level) do
+    CellId.from_face_pos_level(0, 0, 0)
+    |> CellId.child_begin(level)
   end
 
-  def end1(%CellId{} = cell_id, level) do
-
+  def end1(level) do
+    CellId.from_face_pos_level(5, 0, 0)
+    |> CellId.child_end(level)
   end
 
   def none(%CellId{} = cell_id) do
@@ -256,15 +257,48 @@ defmodule S2Sphere.CellId do
   end
 
   def prev_wrap(%CellId{} = cell_id) do
-
+    p = CellId.prev(cell_id)
+    case CellId.id(p) < @wrap_offset do
+      true ->
+        p
+      false ->
+        CellId.new(CellId.id(p) + @wrap_offset)
+    end
   end
 
   def next_wrap(%CellId{} = cell_id) do
-
+    n = CellId.next(cell_id)
+    case CellId.id(n) < @wrap_offset do
+      true ->
+        n
+      false ->
+        CellId.new(CellId.id(n) - @wrap_offset)
+    end
   end
 
+  #is unfinished
   def advance_wrap(%CellId{} = cell_id, steps) do
-
+    step_shift = 2 * (@max_level - CellId.level(cell_id)) + 1
+    cond do
+      steps == 0 ->
+        cell_id
+      steps < 0 ->
+        min_steps = -(CellId.id(cell_id) >>> step_shift)
+        if steps < min_steps do
+          step_wrap = @wrap_offset >>> step_shift
+          if steps < min_steps do
+            steps = steps - step_wrap
+          end
+        end
+      steps > 0 ->
+        max_steps = (@wrap_offset - CellId.id(cell_id)) >>> step_shift
+        if steps > max_steps do
+          step_wrap = @wrap_offset >>> step_shift
+          if steps > max_steps do
+            steps = steps - step_wrap
+          end
+        end
+    end
   end
 
   def advance(%CellId{} = cell_id, steps) do
@@ -287,7 +321,9 @@ defmodule S2Sphere.CellId do
   end
 
   def to_point(%CellId{} = cell_id) do
-
+    cell_id
+    |> CellId.to_point_raw()
+    |> Point.normalize()
   end
 
   def get_center_si_ti(%CellId{id: id} = cell_id) do
@@ -348,11 +384,52 @@ defmodule S2Sphere.CellId do
   end
 
   def get_vertex_neighbors(%CellId{} = cell_id, level) do
-
+    {face, i, j, orientation} = CellId.to_face_ij_orientation(cell_id)
+    halfsize = CellId.get_size_ij(cell_id, level + 1)
+    size = halfsize <<< 1
+    case i &&& halfsize do
+      1 ->
+        ioffset = size
+        isame = (i + size) < @max_size
+      0 ->
+        ioffset = -size
+        isame = (i - size) >= 0
+      _ ->
+    end
+    case j &&& halfsize do
+      1 ->
+        joffset = size
+        jsame = (j + size) < @max_size
+      0 ->
+        joffset = -size
+        jsame = (j - size) >= 0
+      _ ->
+    end
+    neighbors = [CellId.parent(cell_id, level)]
+    neighbors = neighbors ++ [
+      CellId.from_face_ij_same(face, i + ioffset, j, isame)
+      |> CellId.parent(level)
+    ]
+    neighbors = neighbors ++ [
+      CellId.from_face_ij_same(face, i, j + joffset, jsame)
+      |> CellId.parent(level)
+    ]
+    if isame or jsame do
+      neighbors = neighbors ++ [
+        CellId.from_face_ij_same(face, i + ioffset, j + joffset, isame and jsame)
+        |> CellId.parent(level)
+      ]
+    end
   end
 
   def get_all_neighbors(%CellId{} = cell_id, nbr_level) do
+    {face, i, j, orientation} = CellId.to_face_ij_orientation(cell_id)
+    size = CellId.get_size_ij(cell_id)
+    i = i &&& -size
+    j = j &&& -size
 
+    nbr_size = CellId.get_size_ij(cell_id, nbr_level)
+    k = -nbr_size
   end
 
   def get_size_ij(%CellId{} = cell_id) do
@@ -365,11 +442,20 @@ defmodule S2Sphere.CellId do
   end
 
   def to_token(%CellId{id: id}) do
-
+    Integer.to_charlist(id, 16)
+    |> :erlang.list_to_binary()
+    |> String.trim_trailing("0")
   end
 
-  def from_token(%CellId{} = cell_id, token) do
-
+  def from_token(token) do
+    token
+    |> String.ljust(16, ?0)
+    |> Integer.parse(16)
+    |> case do
+      {id, _} -> id
+      _ -> nil
+    end
+    |> CellId.new()
   end
 
   def st_to_uv(s) do
