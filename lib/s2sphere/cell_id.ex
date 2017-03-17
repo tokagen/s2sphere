@@ -423,6 +423,7 @@ defmodule S2Sphere.CellId do
   end
 
   def get_all_neighbors(%CellId{} = cell_id, nbr_level) do
+    import Logger
     {face, i, j, orientation} = CellId.to_face_ij_orientation(cell_id)
     size = CellId.get_size_ij(cell_id)
     i = i &&& -size
@@ -430,6 +431,22 @@ defmodule S2Sphere.CellId do
 
     nbr_size = CellId.get_size_ij(cell_id, nbr_level)
     k = -nbr_size
+    Stream.unfold({k, []}, fn ({k, list}) ->
+      {same_face, vert} = cond do
+        k < 0 -> { ((j + k) >= 0), [] }
+        k >= size -> { ((j + k) < @max_size), [] }
+        true -> { false, [CellId.from_face_ij_same(face, i+k, j-nbr_size, j-size >= 0) |> CellId.parent(nbr_level), CellId.from_face_ij_same(face, i+k, j+size, j+size < @max_size) |> CellId.parent(nbr_level)] }
+      end
+      vert = vert ++ [CellId.from_face_ij_same(face, i-nbr_size, j+k, (same_face) and (i-size >= 0)) |> CellId.parent(nbr_level), CellId.from_face_ij_same(face, i+size, j+k, (same_face) and (i+size < @max_size)) |> CellId.parent(nbr_level)]
+
+      case (k >= size * 2) do
+        true -> nil
+        false -> {{k, vert}, {k + nbr_size, vert}}
+      end
+    end)
+    |> Enum.map(fn({_, list}) -> list end)
+    |> List.flatten
+    |> Enum.to_list
   end
 
   def get_size_ij(%CellId{} = cell_id) do
